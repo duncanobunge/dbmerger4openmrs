@@ -1,0 +1,37 @@
+name: OpenMRS DB Merger
+
+on:
+  schedule:
+    - cron: '0 2 1 * *' # Runs at 2:00 AM UTC on the 1st of every month
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  db-merge:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.8.1
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Install MySQL Client
+        run: sudo apt-get update && sudo apt-get install -y mysql-client
+
+      - name: Execute Merge Script
+        env:
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          REMOTE_HOSTS: ${{ secrets.REMOTE_HOSTS }}
+          CENTRAL_DB_HOST: ${{ secrets.CENTRAL_DB_HOST }}
+        run: |
+          IFS=',' read -ra HOSTS <<< "$REMOTE_HOSTS"
+          for host in "${HOSTS[@]}"; do
+            echo "Pulling data from $host"
+            ssh -o StrictHostKeyChecking=no ubuntu@$host "mysqldump -u $DB_USER -p$DB_PASSWORD openmrs" > temp_dump_$host.sql
+            echo "Merging data into central DB"
+            mysql -h $CENTRAL_DB_HOST -u $DB_USER -p$DB_PASSWORD openmrs < temp_dump_$host.sql
+          done
