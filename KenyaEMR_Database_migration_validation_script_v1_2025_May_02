@@ -1,0 +1,196 @@
+-- SET THESE VARIABLES TO MATCH YOUR ENVIRONMENT
+SET @source_db = 'awendodice';
+SET @dest_db = 'openmrs';
+
+-- Create a temporary table to store results
+DROP TEMPORARY TABLE IF EXISTS migration_validation;
+CREATE TEMPORARY TABLE migration_validation (
+    table_name VARCHAR(50),
+    grouping_column VARCHAR(50),
+    source_count INT,
+    dest_count INT,
+    discrepancy INT,
+    notes VARCHAR(255))
+ENGINE=Memory;
+
+-- 1. Person table comparison (no grouping)
+INSERT INTO migration_validation
+SELECT 
+    'person' AS table_name,
+    NULL AS grouping_column,
+    src.count AS source_count,
+    dest.count AS dest_count,
+    dest.count - src.count AS discrepancy,
+    'Total person records' AS notes
+FROM 
+    (SELECT COUNT(*) AS count FROM awendodice.person where voided=0) src,
+    (SELECT COUNT(*) AS count 
+    FROM openmrs.person p
+    JOIN openmrs.person_id_mapping m ON p.person_id = m.new_person_id) dest;
+
+-- 2. Patient table comparison (no grouping)
+INSERT INTO migration_validation
+SELECT 
+    'patient' AS table_name,
+    NULL AS grouping_column,
+    src.count AS source_count,
+    dest.count AS dest_count,
+    dest.count - src.count AS discrepancy,
+    'Total patient records' AS notes
+FROM 
+    (SELECT COUNT(*) AS count FROM awendodice.patient where voided=0) src,
+    (SELECT COUNT(*) AS count 
+    FROM openmrs.patient pa
+    JOIN openmrs.person_id_mapping m ON pa.patient_id = m.new_person_id) dest;
+
+-- 3. Visit table with patient ID mapping
+INSERT INTO migration_validation
+SELECT 
+    'visit' AS table_name,
+    'patient_id' AS grouping_column,
+    src.cnt AS source_count,
+    COALESCE(dest.cnt, 0) AS dest_count,
+    COALESCE(dest.cnt, 0) - src.cnt AS discrepancy,
+    CONCAT('For patient_id: ', src.patient_id) AS notes
+FROM 
+    (SELECT v.patient_id, COUNT(*) AS cnt 
+     FROM awendodice.visit v
+     GROUP BY v.patient_id) src
+LEFT JOIN
+    (SELECT m.old_person_id AS patient_id, COUNT(*) AS cnt 
+     FROM  openmrs.visit v
+     JOIN openmrs.person_id_mapping m ON v.patient_id = m.new_person_id
+     GROUP BY m.new_person_id) dest
+    ON src.patient_id = dest.patient_id
+WHERE COALESCE(dest.cnt, 0) != src.cnt OR dest.cnt IS NULL;
+
+-- 4. Encounter table comparison (grouped by patient_id)
+INSERT INTO migration_validation
+SELECT 
+    'encounter' AS table_name,
+    'patient_id' AS grouping_column,
+    src.cnt AS source_count,
+    COALESCE(dest.cnt, 0) AS dest_count,
+    COALESCE(dest.cnt, 0) - src.cnt AS discrepancy,
+    CONCAT('For patient_id: ', src.patient_id) AS notes
+FROM 
+    (SELECT patient_id, COUNT(*) AS cnt FROM awendodice.encounter GROUP BY patient_id) src
+LEFT JOIN
+    (SELECT m.old_person_id as patient_id, COUNT(*) AS cnt 
+     FROM openmrs.encounter e 
+     JOIN openmrs.person_id_mapping m ON e.patient_id = m.new_person_id
+     GROUP BY m.new_person_id) dest
+    ON src.patient_id = dest.patient_id
+WHERE COALESCE(dest.cnt, 0) != src.cnt OR dest.cnt IS NULL;
+
+-- 5. Obs table comparison (grouped by person_id)
+INSERT INTO migration_validation
+SELECT 
+    'obs' AS table_name,
+    'person_id' AS grouping_column,
+    src.cnt AS source_count,
+    COALESCE(dest.cnt, 0) AS dest_count,
+    COALESCE(dest.cnt, 0) - src.cnt AS discrepancy,
+    CONCAT('For person_id: ', src.person_id) AS notes
+FROM 
+    (SELECT o.person_id, COUNT(*) AS cnt FROM awendodice.obs o GROUP BY o.person_id) src
+LEFT JOIN
+    (SELECT m.old_person_id as person_id, COUNT(*) AS cnt 
+	 FROM openmrs.obs o
+     JOIN openmrs.person_id_mapping m ON o.person_id = m.new_person_id
+	 GROUP BY m.new_person_id) dest
+    ON src.person_id = dest.person_id
+WHERE COALESCE(dest.cnt, 0) != src.cnt OR dest.cnt IS NULL;
+
+-- 6. Orders table comparison (grouped by patient_id)
+INSERT INTO migration_validation
+SELECT 
+    'orders' AS table_name,
+    'patient_id' AS grouping_column,
+    src.cnt AS source_count,
+    COALESCE(dest.cnt, 0) AS dest_count,
+    COALESCE(dest.cnt, 0) - src.cnt AS discrepancy,
+    CONCAT('For patient_id: ', src.patient_id) AS notes
+FROM 
+    (SELECT patient_id, COUNT(*) AS cnt FROM awendodice.orders GROUP BY patient_id) src
+LEFT JOIN
+    (SELECT m.old_person_id as patient_id, COUNT(*) AS cnt 
+    FROM openmrs.orders o
+    JOIN openmrs.person_id_mapping m ON o.patient_id = m.new_person_id
+	GROUP BY m.new_person_id) dest
+    ON src.patient_id = dest.patient_id
+WHERE COALESCE(dest.cnt, 0) != src.cnt;
+
+-- 7. Patient_program table comparison (grouped by patient_id)
+INSERT INTO migration_validation
+SELECT 
+    'patient_program' AS table_name,
+    'patient_id' AS grouping_column,
+    src.cnt AS source_count,
+    COALESCE(dest.cnt, 0) AS dest_count,
+    COALESCE(dest.cnt, 0) - src.cnt AS discrepancy,
+    CONCAT('For patient_id: ', src.patient_id) AS notes
+FROM 
+    (SELECT patient_id, COUNT(*) AS cnt FROM awendodice.patient_program GROUP BY patient_id) src
+LEFT JOIN
+    (SELECT m.old_person_id as patient_id, COUNT(*) AS cnt 
+    FROM openmrs.patient_program pp
+    JOIN openmrs.person_id_mapping m ON pp.patient_id = m.new_person_id
+	GROUP BY m.new_person_id) dest
+    ON src.patient_id = dest.patient_id
+WHERE COALESCE(dest.cnt, 0) != src.cnt OR dest.cnt IS NULL;
+
+-- Display results with summary
+SELECT 
+    table_name,
+    grouping_column,
+    source_count,
+    dest_count,
+    discrepancy,
+    notes,
+    CASE 
+        WHEN discrepancy = 0 THEN '✓ Match'
+        WHEN discrepancy > 0 THEN '⚠ Extra in destination'
+        WHEN discrepancy < 0 THEN '✗ Missing in destination'
+        WHEN dest_count IS NULL THEN '❗ No matching records in destination'
+    END AS status
+FROM migration_validation
+ORDER BY 
+    table_name,
+    CASE WHEN grouping_column IS NULL THEN 0 ELSE 1 END,
+    grouping_column;
+
+-- Summary statistics
+-- First get basic counts without percentage
+SELECT 
+    table_name,
+    SUM(source_count) AS total_source,
+    SUM(dest_count) AS total_dest,
+    SUM(discrepancy) AS total_discrepancy,
+    COUNT(*) AS discrepancy_cases
+FROM migration_validation
+GROUP BY table_name
+ORDER BY table_name;
+
+-- Then calculate percentages separately if needed
+SELECT 
+    table_name,
+    total_source,
+    total_dest,
+    total_discrepancy,
+    discrepancy_cases,
+    CASE 
+        WHEN total_source = 0 THEN '0%'
+        ELSE CONCAT(ROUND((total_dest / total_source) * 100, 2), '%')
+    END AS migration_rate
+FROM (
+    SELECT 
+        table_name,
+        SUM(source_count) AS total_source,
+        SUM(dest_count) AS total_dest,
+        SUM(discrepancy) AS total_discrepancy,
+        COUNT(*) AS discrepancy_cases
+    FROM migration_validation
+    GROUP BY table_name
+) AS summary
+ORDER BY table_name;
