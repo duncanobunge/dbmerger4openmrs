@@ -1,13 +1,16 @@
-SET autocommit = 0;
-SET FOREIGN_KEY_CHECKS = 0;
+--Initial Setup
+
+SET autocommit = 0; -- Disable autocommit for transaction control
+SET FOREIGN_KEY_CHECKS = 0; -- Temporarily disable foreign key checks
 START TRANSACTION;
 USE openmrs;
--- Step 1: Prepare the environment
--- SET FOREIGN_KEY_CHECKS = 0;
-SET @old_db = 'awendodice';  -- Name of your source database
 
--- Add column to store original DB2 person_id if not exists
--- Step1: Check if column exists before adding (MySQL doesn't support IF NOT EXISTS in ALTER TABLE)
+-- SECTION 1: PERSON DATA MERGING --
+
+-- This section handles merging of core person data including person, person_name, and person_address records
+-- Step 1: Prepare environment by adding person_id2 column if it doesn't exist
+-- This column will store the original person_id from the source database
+
 SET @dbname = DATABASE();
 SET @tablename = 'person';
 SET @columnname = 'person_id2';
@@ -27,7 +30,7 @@ EXECUTE alterIfNotExists;
 DEALLOCATE PREPARE alterIfNotExists;
 
 
--- Step 2: Create mapping infrastructure
+-- Step 2: Create mapping table for person IDs
 TRUNCATE openmrs.person_id_mapping;
 CREATE TABLE IF NOT EXISTS person_id_mapping (
     old_person_id INT NOT NULL,
@@ -35,7 +38,7 @@ CREATE TABLE IF NOT EXISTS person_id_mapping (
     PRIMARY KEY (old_person_id),
     INDEX (new_person_id)
 ) ENGINE=InnoDB;
--- select * from openmrs.person_id_mapping;
+
 
 -- Step 3: Merge person records with UUID conflict resolution
 INSERT INTO person (
@@ -95,7 +98,7 @@ FROM awendodice.person p2
 JOIN person p1 ON p1.person_id2 = p2.person_id
 ON DUPLICATE KEY UPDATE new_person_id = VALUES(new_person_id);
 
--- Step 5: Merge related tables (example for person_name)
+-- Step 5: Merge related tables (person_name)
 INSERT INTO person_name (
     person_id,
     preferred,
@@ -140,7 +143,7 @@ FROM awendodice.person_name n
 JOIN person_id_mapping m ON n.person_id = m.old_person_id
 WHERE n.voided = 0;
 
--- Step 4: Merge person_address records with comprehensive conflict resolution
+-- Step 6: Merge person_address records with comprehensive conflict resolution
 INSERT INTO person_address (
     person_id,
     preferred,
@@ -235,7 +238,7 @@ WHERE a.voided = 0;
 SELECT COUNT(*) INTO @records_merged FROM awendodice.person_address WHERE voided = 0;
 SELECT ROW_COUNT() INTO @conflicts_resolved;
 
--- Step 5: Verify and report merge results
+-- Verify and report merge results
 
 
 SELECT 
@@ -246,7 +249,7 @@ SELECT
     (SELECT COUNT(DISTINCT person_id) FROM person_address WHERE person_id IN 
         (SELECT new_person_id FROM person_id_mapping)) AS 'Persons with addresses merged';
 
--- Optional: Check for potential preferred address conflicts
+-- Check for potential preferred address conflicts
 SELECT 
     m.new_person_id,
     COUNT(CASE WHEN a.preferred = 1 THEN 1 END) AS 'Preferred addresses'
@@ -262,7 +265,8 @@ SET FOREIGN_KEY_CHECKS = 1;
 SET autocommit = 1;
 SELECT 'Merging Persons,Person_names,Person_addresses completed successfully' AS result;
 
--- USERS DATA MIGRATION COMMENCE AT THIS LEVEL
+-- SECTION 2: USERS DATA MIGRATION
+-- This section handles merging of user accounts and their roles
 
 SET autocommit = 0;
 SET FOREIGN_KEY_CHECKS = 0;
@@ -270,7 +274,8 @@ START TRANSACTION;
 use openmrs;
 	DROP TABLE IF EXISTS  openmrs.merge_tracking;
     DROP TABLE IF EXISTS  openmrs.merge_tracking_roles;
-    -- Step 1: Create persistent tracking table instead of temporary
+
+    -- Create persistent tracking table instead of temporary
     -- Create tracking tables (persistent for cross-table operations)
 
     CREATE TABLE IF NOT EXISTS openmrs.merge_tracking (
@@ -280,7 +285,6 @@ use openmrs;
         merge_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     ) ENGINE=InnoDB;
     
-
 	CREATE TABLE IF NOT EXISTS openmrs.merge_tracking_roles (
 			original_user_id INT,
 			role VARCHAR(50),
@@ -288,10 +292,7 @@ use openmrs;
 			PRIMARY KEY (original_user_id, role)
 		) ENGINE=InnoDB;
 
-
-   
-     -- Step 2: Insert non-conflicting records
-     -- STEP 2: Merge non-conflicting users
+     -- Merge non-conflicting users
     INSERT INTO openmrs.users (
         system_id, username, password, salt, secret_question, secret_answer,
         creator, date_created, changed_by, date_changed, person_id,
@@ -317,7 +318,7 @@ use openmrs;
  WHERE u2.retired=0 and u2.system_id NOT IN ('admin','daemon');
  
         
-	-- STEP 4: Prepare user roles mapping
+	-- Prepare user roles mapping
 		INSERT IGNORE INTO openmrs.merge_tracking_roles (original_user_id, role, new_user_id)
 		SELECT 
 			ur.user_id, 
@@ -330,14 +331,14 @@ use openmrs;
 			SELECT 1 FROM openmrs.merge_tracking_roles mtr 
 			WHERE mtr.original_user_id = ur.user_id AND mtr.role = ur.role
 		);
-		-- STEP 4: Merge user roles
+		-- Merge user roles
 		INSERT INTO openmrs.user_role (user_id, role)
 		SELECT 
 			new_user_id, 
 			role
 		FROM 
 			openmrs.merge_tracking_roles;
-    -- Verification
+    -- Verification of users and roles record migrated
     SELECT 
         (SELECT COUNT(*) FROM awendodice.users) AS source_users,
         (SELECT COUNT(*) FROM openmrs.merge_tracking) AS merged_users,
@@ -346,23 +347,22 @@ use openmrs;
         (SELECT COUNT(*) FROM openmrs.user_role WHERE user_id IN 
 		(SELECT new_user_id FROM openmrs.merge_tracking)) AS roles_in_target;
 
-    -- Verification
-    SELECT 
-        (SELECT COUNT(*) FROM awendodice.users) AS source_count,
-        (SELECT COUNT(*) FROM openmrs.merge_tracking) AS merged_count,
-        (SELECT COUNT(*) FROM openmrs.users WHERE username LIKE '%\_merged\_%' ESCAPE '\\') AS resolved_conflicts;
+ -- Reinstate the FK values
 
     COMMIT;
     SET FOREIGN_KEY_CHECKS = 1;
     SET autocommit = 1;
     SELECT 'Merge users, users_role records completed successfully' AS result;
-    
     -- Users Merging Ends Here
-    -- Provider Merging Starts Here
+
+
+    -- SECTION 3 PROVIDERS RECORD MERGING COMMENCE HERE!!
+    -- Handle the FK related to the providers tables by setting them 0
+
     SET autocommit = 0;
 	SET FOREIGN_KEY_CHECKS = 0;
 	START TRANSACTION;
-	use openmrs;
+	USE openmrs;
 
     DROP TABLE IF EXISTS  openmrs.temp_provider_mapping;
     -- Create mapping table for provider IDs
@@ -373,7 +373,7 @@ use openmrs;
         merge_status VARCHAR(20)
     ) ENGINE=InnoDB;
 
-    -- Step 1: Merge providers by UUID first (most reliable)
+    -- Merge providers by UUID first (most reliable)
     INSERT IGNORE INTO openmrs.provider (
         person_id, name, identifier, creator, date_created,
         changed_by, date_changed, retired, retired_by,
@@ -403,7 +403,7 @@ use openmrs;
         openmrs.provider new_p ON p.uuid = new_p.uuid;
 
    
-    -- Step 2: Merge provider attributes
+    -- Merge provider attributes
     INSERT IGNORE INTO openmrs.provider_attribute (
         provider_id, attribute_type_id, value_reference, uuid,
         creator, date_created, changed_by, date_changed,
@@ -428,7 +428,7 @@ use openmrs;
         temp_provider_mapping pm ON pa.provider_id = pm.source_provider_id
     WHERE voided=0;
     
-    -- Verification
+    -- Verification of migrated records
     SELECT 
         (SELECT COUNT(*) FROM awendodice.provider) AS source_providers,
         (SELECT COUNT(*) FROM temp_provider_mapping) AS merged_providers,
@@ -448,15 +448,17 @@ use openmrs;
     SELECT 'Provider merge completed successfully' AS result;
        
 	SELECT 'PATIENT merge started successfully' AS result;
-    -- START PATIENT RECORD MERGING SECTION
+    -- END SECTION  FOR PROVIDERS RECORDS
+
+    -- SECTION FOR PATIENT RECORD MERGING PROCESS STARTS HERE!!
     
     SET autocommit = 0;
 	SET FOREIGN_KEY_CHECKS = 0;
 	START TRANSACTION;
-    use openmrs;
+    USE openmrs;
+
     DROP TABLE IF EXISTS  openmrs.merge_tracking_patients;
-    
-    -- Step 1: Create tracking table for merged patients
+    -- Create tracking table for merged patients
     CREATE TABLE IF NOT EXISTS openmrs.merge_tracking_patients (
         source_patient_id INT PRIMARY KEY,
         target_patient_id INT,
@@ -464,7 +466,7 @@ use openmrs;
         merge_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     ) ENGINE=InnoDB;
     
-    -- Step 1: Create accurate mapping table between source and target patient IDs
+    -- Create accurate mapping table between source and target patient IDs
     DROP TABLE IF EXISTS  openmrs.temp_patient_id_mapping;
     CREATE TABLE IF NOT EXISTS temp_patient_id_mapping(
         source_patient_id INT PRIMARY KEY,
@@ -482,7 +484,7 @@ use openmrs;
     JOIN openmrs.person per ON p.patient_id = per.person_id2
     WHERE p.voided = 0;
     
-    -- Step 2: Merge patients that already exist in target person table
+    -- Merge patients that already exist in target person table
     INSERT INTO openmrs.patient (
         patient_id, creator, date_created, changed_by, date_changed,
         voided, voided_by, date_voided, void_reason, allergy_status
@@ -547,7 +549,7 @@ use openmrs;
         merge_status VARCHAR(20)
     ) ENGINE=InnoDB;
 
-    -- Step 1: Merge patient programs by UUID first
+    -- Merge patient programs by UUID first
     INSERT IGNORE INTO openmrs.patient_program (
         patient_id, program_id, date_enrolled, date_completed,
         location_id, outcome_concept_id, creator, date_created,
@@ -591,7 +593,7 @@ use openmrs;
     JOIN 
         openmrs.patient_program new_pp ON pp.uuid = new_pp.uuid;
 
-    -- Step 3: Merge patient identifiers by UUID
+    -- Merge patient identifiers by UUID
     INSERT IGNORE INTO openmrs.patient_identifier (
         patient_id, identifier, identifier_type, preferred,
         location_id, creator, date_created, date_changed,
@@ -650,7 +652,7 @@ use openmrs;
     
     SELECT 'Patient programs and identifiers merge completed successfully' AS result;
     
-    -- !!!PATIENT APPOINTMENT STARTS HERE!!!
+    -- SECTION FOR PATIENT APPOINTMENT STARTS HERE!!!
     SELECT 'Patient APPOINTMENTS merge STARTED successfully' AS result;
     
     SET autocommit = 0;
@@ -666,7 +668,7 @@ use openmrs;
         merge_status VARCHAR(20))
     ENGINE=InnoDB;
 
-    -- Step 1: Migrate appointments by UUID first (most reliable)
+    -- Migrate appointments by UUID first (most reliable)
     INSERT IGNORE INTO openmrs.patient_appointment (
         provider_id, appointment_number, patient_id, start_date_time,
         end_date_time, appointment_service_id, appointment_service_type_id,
@@ -729,7 +731,7 @@ use openmrs;
         NOT EXISTS (SELECT 1 FROM temp_appointment_mapping WHERE source_appointment_id = pa.patient_appointment_id);
 
    
-    -- Step 3: Update related appointment references
+    -- Update related appointment references
     UPDATE openmrs.patient_appointment target
     JOIN temp_appointment_mapping tm ON target.patient_appointment_id = tm.target_appointment_id
     JOIN awendodice.patient_appointment source ON tm.source_appointment_id = source.patient_appointment_id
@@ -737,7 +739,7 @@ use openmrs;
     SET target.related_appointment_id = related_tm.target_appointment_id
     WHERE source.related_appointment_id IS NOT NULL;
 
-    -- Step 4: Migrate appointment providers
+    -- Migrate appointment providers
     INSERT IGNORE INTO openmrs.patient_appointment_provider (
         patient_appointment_id, provider_id, response,
         comments, date_created, creator, date_changed,
@@ -771,7 +773,7 @@ use openmrs;
     WHERE 
         NOT EXISTS (SELECT 1 FROM openmrs.patient_appointment_provider WHERE uuid = pap.uuid);
 
-    -- Step 5: Migrate appointment audit logs
+    -- Migrate appointment audit logs
     INSERT IGNORE INTO openmrs.patient_appointment_audit (
         appointment_id, uuid, date_created, creator,
         date_changed, changed_by, voided, voided_by,
@@ -825,7 +827,7 @@ use openmrs;
     SET autocommit = 0;
 	SET FOREIGN_KEY_CHECKS = 0;
 	START TRANSACTION;
-	use openmrs;
+	USE openmrs;
 
 
     -- Create mapping tables for visits
@@ -837,7 +839,7 @@ use openmrs;
         merge_status VARCHAR(20)
     ) ENGINE=InnoDB;
 
-    -- Step 1: Migrate visits by UUID first
+    -- Migrate visits by UUID first
     INSERT IGNORE INTO openmrs.visit (
         patient_id, visit_type_id, date_started, date_stopped,
         indication_concept_id, location_id, creator, date_created,
@@ -884,7 +886,7 @@ use openmrs;
         NOT EXISTS (SELECT 1 FROM temp_visit_mapping WHERE source_visit_id = v.visit_id);
 
 
-    -- Step 3: Migrate visit attributes by UUID
+    -- Migrate visit attributes by UUID
     INSERT IGNORE INTO openmrs.visit_attribute (
         visit_id, attribute_type_id, value_reference, uuid,
         creator, date_created, changed_by, date_changed,
@@ -945,7 +947,7 @@ use openmrs;
         merge_status VARCHAR(20))
     ENGINE=InnoDB;
 
-    -- Step 1: Migrate encounters by UUID first (most reliable)
+    --Migrate encounters by UUID first (most reliable)
     INSERT IGNORE INTO openmrs.encounter (
         encounter_type, patient_id, location_id, form_id,
         encounter_datetime, creator, date_created, voided,
@@ -995,7 +997,7 @@ use openmrs;
     WHERE 
         NOT EXISTS (SELECT 1 FROM temp_encounter_mapping WHERE source_encounter_id = e.encounter_id);
         
-    -- Step 3: Migrate encounter providers
+    -- Migrate encounter providers
     INSERT IGNORE INTO openmrs.encounter_provider (
         encounter_id, provider_id, encounter_role_id,
         creator, date_created, changed_by, date_changed,
@@ -1069,7 +1071,7 @@ use openmrs;
         merge_status VARCHAR(20))
     ENGINE=InnoDB;
     	  
-      -- 1. Create order_group mapping table if not exists
+      -- Create order_group mapping table if not exists
 DROP TABLE IF EXISTS openmrs.temp_order_group_mapping; 
 CREATE TABLE IF NOT EXISTS openmrs.temp_order_group_mapping (
     source_order_group_id INT PRIMARY KEY,
@@ -1078,7 +1080,7 @@ CREATE TABLE IF NOT EXISTS openmrs.temp_order_group_mapping (
     merge_status VARCHAR(20)
 ) ENGINE=InnoDB;
 
-    -- Step 1: Migrate orders first (since obs references orders)
+    -- Migrate orders first (since obs references orders)
     INSERT IGNORE INTO openmrs.orders (
         order_type_id, concept_id, orderer, encounter_id,
         instructions, date_activated, auto_expire_date, date_stopped,
@@ -1200,8 +1202,7 @@ CREATE TABLE IF NOT EXISTS openmrs.temp_order_group_mapping (
 		WHERE order_id = om.target_order_id
 	);
 
-
--- 2. Migrate order_group records
+-- Migrate order_group records
 INSERT INTO openmrs.order_group (
     order_set_id,
     patient_id,
@@ -1244,7 +1245,7 @@ JOIN
 WHERE 
     NOT EXISTS (SELECT 1 FROM openmrs.order_group WHERE uuid = og.uuid);
 
--- 3. Populate order_group mapping table
+-- Populate order_group mapping table
 INSERT INTO openmrs.temp_order_group_mapping (
     source_order_group_id,
     target_order_group_id,
@@ -1266,7 +1267,7 @@ WHERE
         WHERE source_order_group_id = og.order_group_id
     );
 
--- 4. Update parent/previous order_group references (recursive relationships)
+-- Update parent/previous order_group references (recursive relationships)
 UPDATE openmrs.order_group dest
 JOIN awendodice.order_group src ON dest.uuid = src.uuid
 LEFT JOIN openmrs.temp_order_group_mapping pgm ON src.parent_order_group = pgm.source_order_group_id
@@ -1279,7 +1280,7 @@ WHERE
     src.previous_order_group IS NOT NULL;
 
         
-    -- Step 3: Migrate observations
+    -- Migrate observations
     INSERT IGNORE INTO openmrs.obs (
         person_id, concept_id, encounter_id, order_id,
         obs_datetime, location_id, obs_group_id, accession_number,
@@ -1351,7 +1352,7 @@ WHERE
     WHERE 
         NOT EXISTS (SELECT 1 FROM temp_obs_mapping WHERE source_obs_id = o.obs_id);
 
-    -- Step 4: Update order relationships (previous_order_id)
+    -- Update order relationships (previous_order_id)
     UPDATE openmrs.orders target
     JOIN temp_order_mapping tm ON target.order_id = tm.target_order_id
     JOIN awendodice.orders source ON tm.source_order_id = source.order_id
@@ -1359,10 +1360,10 @@ WHERE
     SET target.previous_order_id = prev_tm.target_order_id
     WHERE source.previous_order_id IS NOT NULL;
 
-    -- Step 5: Update order_group_id references if you have order_group tables
+    -- Update order_group_id references if you have order_group tables
     -- This would require a similar approach if you're migrating order groups
 
-    -- Step 6: Update observation relationships (obs_group_id, previous_version)
+    --Update observation relationships (obs_group_id, previous_version)
     UPDATE openmrs.obs target
     JOIN temp_obs_mapping tm ON target.obs_id = tm.target_obs_id
     JOIN awendodice.obs source ON tm.source_obs_id = source.obs_id
@@ -1424,7 +1425,8 @@ WHERE
         merge_status VARCHAR(20)
     ) ENGINE=InnoDB;
 
-    -- Step 1: Migrate relationships
+    -- Migrate Relationship records  
+    Migrate relationships
     INSERT IGNORE INTO openmrs.relationship (
         person_a, relationship, person_b, start_date,
         end_date, creator, date_created, date_changed,
@@ -1473,7 +1475,7 @@ WHERE
     WHERE 
         NOT EXISTS (SELECT 1 FROM temp_relationship_mapping WHERE source_relationship_id = r.relationship_id);
 
-    -- Step 2: Migrate patient contacts
+    -- Migrate patient contacts
     INSERT IGNORE INTO openmrs.kenyaemr_hiv_testing_patient_contact (
         uuid, obs_group_id, first_name, middle_name,
         last_name, sex, birth_date, physical_address,
@@ -1545,7 +1547,7 @@ WHERE
     WHERE 
         NOT EXISTS (SELECT 1 FROM temp_patient_contact_mapping WHERE source_contact_id = pc.id);
 
-    -- Step 3: Migrate client traces
+    -- Migrate client traces
     INSERT IGNORE INTO openmrs.kenyaemr_hiv_testing_client_trace (
         client_id, uuid, contact_type, status,
         unique_patient_no, facility_linked_to,
@@ -1583,7 +1585,7 @@ WHERE
     WHERE 
         NOT EXISTS (SELECT 1 FROM openmrs.kenyaemr_hiv_testing_client_trace WHERE uuid = ct.uuid);
 
-    -- Step 4: Migrate patient risk scores
+    -- Migrate patient risk scores
     INSERT IGNORE INTO openmrs.kenyaemr_ml_patient_risk_score (
         source_system_uuid, patient_id, risk_score,
         evaluation_date, creator, date_created,
@@ -1714,7 +1716,7 @@ WHERE
             AND patient_id = ptm.target_patient_id
         );
 
-    -- Step 5: Migrate lab manifests
+    -- Migrate lab manifests
     INSERT IGNORE INTO openmrs.kenyaemr_order_entry_lab_manifest (
         start_date, end_date, dispatch_date,
         courier, courier_officer, status,
@@ -1756,7 +1758,7 @@ WHERE
     WHERE 
         NOT EXISTS (SELECT 1 FROM openmrs.kenyaemr_order_entry_lab_manifest WHERE uuid = lm.uuid);
 
-    -- Step 6: Migrate lab manifest orders
+    -- Migrate lab manifest orders
     INSERT IGNORE INTO openmrs.kenyaemr_order_entry_lab_manifest_order (
         manifest_id, order_id, sample_type, payload,
         date_sent, status, result, result_date,
@@ -1831,18 +1833,12 @@ WHERE
 	SET FOREIGN_KEY_CHECKS = 0;
 	START TRANSACTION;
 	use openmrs;
-    -- Step 1: Identify the target location ID you want to use
+    -- Identify the target location ID you want to use
     -- Replace 'Desired Location Name' with your specific location name
     SET @target_location_id = (SELECT location_id FROM location WHERE name = 'Kisumu Police Line Dispensary' LIMIT 1);
 	
     -- Verify we found the location
     SELECT @target_location_id;
-    -- Verify we found the location
---     IF @target_location_id IS NULL THEN
---         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Target location not found';
---     END IF;
-
-    -- Step 2: Update all tables with location_id references
     -- Update encounter table
     UPDATE encounter SET location_id = @target_location_id WHERE location_id IS NULL;
     
@@ -1852,14 +1848,13 @@ WHERE
     -- Update obs table
     UPDATE obs SET location_id = @target_location_id WHERE location_id IS NULL;
     
-    
     -- Update patient_identifier table
     UPDATE patient_identifier SET location_id = @target_location_id WHERE location_id IS NULL;
     
+
     -- Update patient_program table
     UPDATE patient_program SET location_id = @target_location_id WHERE location_id IS NULL;
     
-
 
     -- Verification: Count records updated in each table
     SELECT 
